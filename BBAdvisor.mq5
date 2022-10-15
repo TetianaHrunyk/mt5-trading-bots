@@ -27,7 +27,10 @@ input int    InpTrailingStop  =30;  // Trailing Stop Level (in pips)
 input int    InpMACDOpenLevel =3;   // MACD open level (in pips)
 input int    InpMACDCloseLevel=2;   // MACD close level (in pips)
 input int    InpMATrendPeriod =26;  // MA trend period
+input int    InpMATrendValidationPeriod =3;  // The period the trend has to be observed to apply signal
+input int    InpMATrendValidationThreshold =2;  // Minimum diff in pips to consider trend as changed
 input bool   InpValidatePriceRange =true;  // Check if the price is not in the dead valley between bb1 and bb2
+input bool   InpValidateMATrend =true;  // Check if trend is positive or negative before deals
 
 enum SIGNAL
   {
@@ -58,6 +61,7 @@ protected:
    //---
    double            m_macd_open_level;
    double            m_macd_close_level;
+   double            m_ma_trend_threshold;
    double            m_traling_stop;
    double            m_take_profit;
 
@@ -77,8 +81,11 @@ protected:
    bool              ShortModified(void);
    bool              LongOpened(void);
    bool              ShortOpened(void);
-   bool              Signal(SIGNAL opportunity);
+   bool              Signal(SIGNAL opportunity, bool is_price_valid);
    bool              IsPriceRangeValid(SIGNAL opportunity);
+   bool              ValidatePrice(SIGNAL opportunity);
+   bool              MATrendObserved(SIGNAL direction);
+   bool              ValidateMATrend(SIGNAL direction);
   };
 //--- global expert
 CSampleExpert ExtExpert;
@@ -119,6 +126,7 @@ bool CSampleExpert::Init(void)
 //--- set default deviation for trading in adjusted points
    m_macd_open_level =InpMACDOpenLevel*m_adjusted_point;
    m_macd_close_level=InpMACDCloseLevel*m_adjusted_point;
+   m_ma_trend_threshold=InpMATrendValidationThreshold*m_adjusted_point;
    m_traling_stop    =InpTrailingStop*m_adjusted_point;
    m_take_profit     =InpTakeProfit*m_adjusted_point;
 //--- set default deviation for trading in adjusted points
@@ -211,6 +219,37 @@ bool CSampleExpert::InitIndicators(CIndicators *indicators)
   }
   
 //+------------------------------------------------------------------+
+//|Check if MA confirms positive or negative trend                   |
+//+------------------------------------------------------------------+  
+bool CSampleExpert::MATrendObserved(SIGNAL direction) 
+{
+   bool res = true;
+   for (int i=0; i<InpMATrendValidationPeriod-1; i++) {
+      // positive trend?
+      if (direction == BUY)  {
+         if (m_bands_1.Base(i) - m_bands_1.Base(i+1) <= m_ma_trend_threshold) {
+          res=false;
+          break;
+         }
+      }
+      // negative trend?
+      if (direction == SELL)  {
+         if (m_bands_1.Base(i) - m_bands_1.Base(i+1) >= m_ma_trend_threshold) {
+          res=false;
+          break;
+         }
+      }
+   }
+   return(res);
+}
+
+bool CSampleExpert::ValidateMATrend(SIGNAL direction){
+   bool is_valid = true;
+   if (InpValidateMATrend) is_valid = MATrendObserved(direction);
+   return (is_valid);
+}
+
+//+------------------------------------------------------------------+
 //|Check if the prices are in the correct rabge for opening a position
 //+------------------------------------------------------------------+
 bool CSampleExpert::IsPriceRangeValid(SIGNAL opportunity)
@@ -240,14 +279,18 @@ bool CSampleExpert::IsPriceRangeValid(SIGNAL opportunity)
    return(res);
   }
 
+bool CSampleExpert::ValidatePrice(SIGNAL opportunity){
+   bool is_price_valid = true;
+   if (InpValidatePriceRange) is_price_valid = IsPriceRangeValid(opportunity);
+   return (is_price_valid);
+}
+
 //+------------------------------------------------------------------+
 //| Check for signal                                                 |
 //+------------------------------------------------------------------+
-bool CSampleExpert::Signal(SIGNAL opportunity)
+bool CSampleExpert::Signal(SIGNAL opportunity, bool is_price_valid=true)
   {
    bool res = false;
-   bool is_price_valid = true;
-   if (InpValidatePriceRange) is_price_valid = IsPriceRangeValid(opportunity);
    
    if(opportunity == SELL)
      {
@@ -277,7 +320,7 @@ bool CSampleExpert::LongClosed(void)
   {
    bool res=false;
 //--- Sell
-   if(Signal(SELL))
+   if(Signal(SELL, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(BUY))
      {
       //--- close position
       if(m_trade.PositionClose(Symbol()))
@@ -296,7 +339,7 @@ bool CSampleExpert::ShortClosed(void)
   {
    bool res=false;
 //--- should it be closed?
-   if(Signal(BUY))
+   if(Signal(BUY, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(SELL))
      {
       //--- close position
       if(m_trade.PositionClose(Symbol()))
@@ -378,7 +421,7 @@ bool CSampleExpert::LongOpened(void)
   {
    bool res=false;
 //--- check for long position (BUY) possibility
-   if(Signal(BUY))
+   if(Signal(BUY, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(BUY))
      {
       double price=m_symbol.Ask();
       double tp   =m_symbol.Bid()+m_take_profit;
@@ -411,7 +454,7 @@ bool CSampleExpert::ShortOpened(void)
    bool res=false;
 //--- check for short position (SELL) possibility
 
-   if(Signal(SELL))
+   if(Signal(SELL, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(SELL))
      {
       double price=m_symbol.Bid();
       double tp   =m_symbol.Ask()-m_take_profit;
