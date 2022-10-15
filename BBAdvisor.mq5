@@ -27,6 +27,7 @@ input int    InpTrailingStop  =30;  // Trailing Stop Level (in pips)
 input int    InpMACDOpenLevel =3;   // MACD open level (in pips)
 input int    InpMACDCloseLevel=2;   // MACD close level (in pips)
 input int    InpMATrendPeriod =26;  // MA trend period
+input bool   InpValidatePriceRange =true;  // Check if the price is not in the dead valley between bb1 and bb2
 
 enum SIGNAL
   {
@@ -48,7 +49,8 @@ protected:
    CPositionInfo     m_position;                   // trade position object
    CAccountInfo      m_account;                    // account info wrapper
    //--- indicators
-   CiBands            m_bands;                      // Bollinger bands object indicator handle
+   CiBands            m_bands_1;                     // Bollinger bands object indicator handle
+   CiBands            m_bands_2;                     // Bollinger bands object indicator handle
    CiMACD             m_macd;                       // MACD object indicator handle
    CIndicators        m_indicators;                 // indicator collection to fast recalculations
    //--- indicator buffers
@@ -76,6 +78,7 @@ protected:
    bool              LongOpened(void);
    bool              ShortOpened(void);
    bool              Signal(SIGNAL opportunity);
+   bool              IsPriceRangeValid(SIGNAL opportunity);
   };
 //--- global expert
 CSampleExpert ExtExpert;
@@ -182,12 +185,23 @@ bool CSampleExpert::InitIndicators(CIndicators *indicators)
       return(false);
      }
 //--- add Bollinger Bands object to collection
-   if(!indicators.Add(GetPointer(m_bands)))
+   if(!indicators.Add(GetPointer(m_bands_1)))
      {
       printf(__FUNCTION__+": error adding MACD object");
       return(false);
      }
-   if(!m_bands.Create(NULL,0,InpMATrendPeriod,0,2,PRICE_CLOSE))
+   if(!m_bands_1.Create(NULL,0,InpMATrendPeriod,0,1,PRICE_CLOSE))
+     {
+      printf(__FUNCTION__+": error BB initializing object");
+      return(false);
+     }
+//--- add Bollinger Bands object to collection
+   if(!indicators.Add(GetPointer(m_bands_2)))
+     {
+      printf(__FUNCTION__+": error adding MACD object");
+      return(false);
+     }
+   if(!m_bands_2.Create(NULL,0,InpMATrendPeriod,0,2,PRICE_CLOSE))
      {
       printf(__FUNCTION__+": error BB initializing object");
       return(false);
@@ -195,16 +209,49 @@ bool CSampleExpert::InitIndicators(CIndicators *indicators)
 //--- succeed
    return(true);
   }
+  
+//+------------------------------------------------------------------+
+//|Check if the prices are in the correct rabge for opening a position
+//+------------------------------------------------------------------+
+bool CSampleExpert::IsPriceRangeValid(SIGNAL opportunity)
+  {
+
+   bool res = true;
+   if(opportunity == SELL)
+     {
+     double price=m_symbol.Bid();
+      if(price >= m_bands_1.Upper(0))
+        {
+         printf("Invalid price range for Sell");
+         res = false;
+        }
+     }
+   else
+      if(opportunity == BUY)
+        {
+        double price=m_symbol.Ask();
+         if(price <= m_bands_1.Lower(0))
+           {
+            printf("Invalid price range for Buy");
+            res = false;
+           }
+        }
+
+   return(res);
+  }
 
 //+------------------------------------------------------------------+
-//| Check for long position closing                                  |
+//| Check for signal                                                 |
 //+------------------------------------------------------------------+
 bool CSampleExpert::Signal(SIGNAL opportunity)
   {
    bool res = false;
+   bool is_price_valid = true;
+   if (InpValidatePriceRange) is_price_valid = IsPriceRangeValid(opportunity);
+   
    if(opportunity == SELL)
      {
-      if(rates[2].high >= m_bands.Upper(2) && rates[1].high < m_bands.Upper(1))
+      if(rates[2].high >= m_bands_2.Upper(2) && rates[1].high < m_bands_2.Upper(1) && is_price_valid)
         {
          printf("Sell");
          res = true;
@@ -213,7 +260,7 @@ bool CSampleExpert::Signal(SIGNAL opportunity)
    else
       if(opportunity == BUY)
         {
-         if(rates[2].low <= m_bands.Lower(2) && rates[1].low > m_bands.Lower(1))
+         if(rates[2].low <= m_bands_2.Lower(2) && rates[1].low > m_bands_2.Lower(1) && is_price_valid)
            {
             printf("Buy");
             res = true;
