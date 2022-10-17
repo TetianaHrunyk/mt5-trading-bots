@@ -23,14 +23,17 @@
 //---
 input double InpLots          =0.1; // Lots
 input int    InpTakeProfit    =50;  // Take Profit (in pips)
-input int    InpTrailingStop  =20;  // Trailing Stop Level (in pips)
+input int    InpTrailingStop  =30;  // Trailing Stop Level (in pips)
+input int    InpMACDOpenLevel =3;   // MACD open level (in pips)
+input int    InpMACDCloseLevel=2;   // MACD close level (in pips)
 input int    InpMATrendPeriod =20;  // MA trend period
-input bool   InpValidateMATrend =false;  // Check if trend is positive or negative before deals
 input int    InpMATrendValidationPeriod =3;  // The period the trend has to be observed to apply signal
 input int    InpMATrendValidationThreshold =2;  // Minimum diff in pips to consider trend as changed
-input bool   InpValidatePriceRange =true;  // Check if the price between bb1 and bb2 when opening or closing a position
-
-
+input int    InpSqueezesTreshold =5;  // Below will be considered as price squeeze
+input int    InpSqueezeLookbackPeriod =5;  // Periods to look back for price squueze
+input bool   InpValidatePriceRange =true;  // Check if the price is not in the dead valley between bb1 and bb2
+input bool   InpValidateMATrend =false;  // Check if trend is positive or negative before deals
+input bool   InpTradeOnSqueezes =true;  // Trade when price range is narrow
 
 enum SIGNAL
   {
@@ -41,7 +44,7 @@ enum SIGNAL
 //---
 int ExtTimeOut=10; // time out in seconds between trade operations
 //+------------------------------------------------------------------+
-//| Simple BB advisor                                                |
+//| MACD Sample expert class                                         |
 //+------------------------------------------------------------------+
 class CSampleExpert
   {
@@ -54,13 +57,17 @@ protected:
    //--- indicators
    CiBands            m_bands_1;                     // Bollinger bands object indicator handle
    CiBands            m_bands_2;                     // Bollinger bands object indicator handle
+   CiMACD             m_macd;                       // MACD object indicator handle
    CIndicators        m_indicators;                 // indicator collection to fast recalculations
    //--- indicator buffers
    MqlRates          rates[];                      // Rates buffer
    //---
+   double            m_macd_open_level;
+   double            m_macd_close_level;
    double            m_ma_trend_threshold;
    double            m_traling_stop;
    double            m_take_profit;
+   double            m_squeeze_threshold;
 
 public:
                      CSampleExpert(void);
@@ -78,11 +85,13 @@ protected:
    bool              ShortModified(void);
    bool              LongOpened(void);
    bool              ShortOpened(void);
-   bool              Signal(SIGNAL opportunity);
+   bool              Signal(SIGNAL opportunity, bool is_price_valid);
    bool              IsPriceRangeValid(SIGNAL opportunity);
    bool              ValidatePrice(SIGNAL opportunity);
    bool              MATrendObserved(SIGNAL direction);
    bool              ValidateMATrend(SIGNAL direction);
+   bool              IsPriceSqueezing();
+   bool              ValidatePriceSqueezing();
   };
 //--- global expert
 CSampleExpert ExtExpert;
@@ -90,6 +99,8 @@ CSampleExpert ExtExpert;
 //| Constructor                                                      |
 //+------------------------------------------------------------------+
 CSampleExpert::CSampleExpert(void) : m_adjusted_point(0),
+   m_macd_open_level(0),
+   m_macd_close_level(0),
    m_traling_stop(0),
    m_take_profit(0)
   {
@@ -119,7 +130,10 @@ bool CSampleExpert::Init(void)
       digits_adjust=10;
    m_adjusted_point=m_symbol.Point()*digits_adjust;
 //--- set default deviation for trading in adjusted points
+   m_macd_open_level =InpMACDOpenLevel*m_adjusted_point;
+   m_macd_close_level=InpMACDCloseLevel*m_adjusted_point;
    m_ma_trend_threshold=InpMATrendValidationThreshold*m_adjusted_point;
+   m_squeeze_threshold=InpSqueezesTreshold*m_adjusted_point;
    m_traling_stop    =InpTrailingStop*m_adjusted_point;
    m_take_profit     =InpTakeProfit*m_adjusted_point;
 //--- set default deviation for trading in adjusted points
@@ -174,6 +188,17 @@ bool CSampleExpert::InitIndicators(CIndicators *indicators)
 //--- check pointer
    if(indicators==NULL)
       return(false);
+//--- add MACD object to collection
+   if(!indicators.Add(GetPointer(m_macd)))
+     {
+      printf(__FUNCTION__+": error adding MACD object");
+      return(false);
+     }
+   if(!m_macd.Create(NULL,0,12,26,9,PRICE_CLOSE))
+     {
+      printf(__FUNCTION__+": error initializing object");
+      return(false);
+     }
 //--- add Bollinger Bands object to collection
    if(!indicators.Add(GetPointer(m_bands_1)))
      {
@@ -199,37 +224,75 @@ bool CSampleExpert::InitIndicators(CIndicators *indicators)
 //--- succeed
    return(true);
   }
-  
+
 //+------------------------------------------------------------------+
 //|Check if MA confirms positive or negative trend                   |
-//+------------------------------------------------------------------+  
-bool CSampleExpert::MATrendObserved(SIGNAL direction) 
-{
+//+------------------------------------------------------------------+
+bool CSampleExpert::MATrendObserved(SIGNAL direction)
+  {
    bool res = true;
-   for (int i=0; i<InpMATrendValidationPeriod-1; i++) {
+   for(int i=0; i<InpMATrendValidationPeriod-1; i++)
+     {
       // positive trend?
-      if (direction == BUY)  {
-         if (m_bands_1.Base(i) - m_bands_1.Base(i+1) <= m_ma_trend_threshold) {
-          res=false;
-          break;
-         }
-      }
+      if(direction == BUY)
+        {
+         if(m_bands_1.Base(i) - m_bands_1.Base(i+1) <= m_ma_trend_threshold)
+           {
+            res=false;
+            break;
+           }
+        }
       // negative trend?
-      if (direction == SELL)  {
-         if (m_bands_1.Base(i) - m_bands_1.Base(i+1) >= m_ma_trend_threshold) {
-          res=false;
-          break;
-         }
-      }
-   }
+      if(direction == SELL)
+        {
+         if(m_bands_1.Base(i) - m_bands_1.Base(i+1) >= m_ma_trend_threshold)
+           {
+            res=false;
+            break;
+           }
+        }
+     }
    return(res);
-}
+  }
 
-bool CSampleExpert::ValidateMATrend(SIGNAL direction){
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool CSampleExpert::ValidateMATrend(SIGNAL direction)
+  {
    bool is_valid = true;
-   if (InpValidateMATrend) is_valid = MATrendObserved(direction);
+   if(InpValidateMATrend)
+      is_valid = MATrendObserved(direction);
    return (is_valid);
-}
+  }
+
+//+------------------------------------------------------------------+
+//|Check prices are squeezing                   |
+//+------------------------------------------------------------------+
+bool CSampleExpert::IsPriceSqueezing(void)
+  {
+   bool res = true;
+   for(int i=0; i<InpSqueezeLookbackPeriod; i++)
+     {
+      if(MathAbs(rates[i].open - rates[i].close) > m_squeeze_threshold)
+        {
+         res = false;
+         break;
+        }
+     }
+   return(res);
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool CSampleExpert::ValidatePriceSqueezing(void)
+  {
+   bool is_valid = true;
+   if(!InpTradeOnSqueezes)
+      is_valid = !IsPriceSqueezing();
+   return (is_valid);
+  }
 
 //+------------------------------------------------------------------+
 //|Check if the prices are in the correct rabge for opening a position
@@ -238,31 +301,50 @@ bool CSampleExpert::IsPriceRangeValid(SIGNAL opportunity)
   {
 
    bool res = true;
-   double price=0;
-   if(opportunity == SELL) price=m_symbol.Bid();
-   if(opportunity == BUY) price=m_symbol.Ask();
-   
-   if (price >= m_bands_1.Upper(0) || price <= m_bands_1.Lower(0)) res = false;
-   
+   if(opportunity == SELL)
+     {
+      double price=m_symbol.Bid();
+      if(price >= m_bands_1.Upper(0))
+        {
+         printf("Invalid price range for Sell");
+         res = false;
+        }
+     }
+   else
+      if(opportunity == BUY)
+        {
+         double price=m_symbol.Ask();
+         if(price <= m_bands_1.Lower(0))
+           {
+            printf("Invalid price range for Buy");
+            res = false;
+           }
+        }
+
    return(res);
   }
 
-bool CSampleExpert::ValidatePrice(SIGNAL opportunity){
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool CSampleExpert::ValidatePrice(SIGNAL opportunity)
+  {
    bool is_price_valid = true;
-   if (InpValidatePriceRange) is_price_valid = IsPriceRangeValid(opportunity);
+   if(InpValidatePriceRange)
+      is_price_valid = IsPriceRangeValid(opportunity);
    return (is_price_valid);
-}
+  }
 
 //+------------------------------------------------------------------+
 //| Check for signal                                                 |
 //+------------------------------------------------------------------+
-bool CSampleExpert::Signal(SIGNAL opportunity)
+bool CSampleExpert::Signal(SIGNAL opportunity, bool is_price_valid=true)
   {
    bool res = false;
-   
+
    if(opportunity == SELL)
      {
-      if(rates[2].high >= m_bands_2.Upper(2) && rates[1].high < m_bands_2.Upper(1))
+      if(rates[2].high >= m_bands_2.Upper(2) && rates[1].high < m_bands_2.Upper(1) && is_price_valid)
         {
          printf("Sell");
          res = true;
@@ -271,7 +353,7 @@ bool CSampleExpert::Signal(SIGNAL opportunity)
    else
       if(opportunity == BUY)
         {
-         if(rates[2].low <= m_bands_2.Lower(2) && rates[1].low > m_bands_2.Lower(1))
+         if(rates[2].low <= m_bands_2.Lower(2) && rates[1].low > m_bands_2.Lower(1) && is_price_valid)
            {
             printf("Buy");
             res = true;
@@ -288,7 +370,7 @@ bool CSampleExpert::LongClosed(void)
   {
    bool res=false;
 //--- Sell
-   if(Signal(SELL) && ValidatePrice(SELL) && ValidateMATrend(BUY))
+   if(Signal(SELL, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(BUY))
      {
       //--- close position
       if(m_trade.PositionClose(Symbol()))
@@ -307,7 +389,7 @@ bool CSampleExpert::ShortClosed(void)
   {
    bool res=false;
 //--- should it be closed?
-   if(Signal(BUY) && ValidatePrice(BUY) && ValidateMATrend(SELL))
+   if(Signal(BUY, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(SELL))
      {
       //--- close position
       if(m_trade.PositionClose(Symbol()))
@@ -389,7 +471,7 @@ bool CSampleExpert::LongOpened(void)
   {
    bool res=false;
 //--- check for long position (BUY) possibility
-   if(Signal(BUY) && ValidatePrice(BUY) && ValidateMATrend(BUY))
+   if(Signal(BUY, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(BUY) && ValidatePriceSqueezing())
      {
       double price=m_symbol.Ask();
       double tp   =m_symbol.Bid()+m_take_profit;
@@ -422,7 +504,7 @@ bool CSampleExpert::ShortOpened(void)
    bool res=false;
 //--- check for short position (SELL) possibility
 
-   if(Signal(SELL) && ValidatePrice(SELL) && ValidateMATrend(SELL))
+   if(Signal(SELL, ValidatePrice(BUY) && ValidatePrice(SELL)) && ValidateMATrend(SELL) && ValidatePriceSqueezing())
      {
       double price=m_symbol.Bid();
       double tp   =m_symbol.Ask()-m_take_profit;
@@ -458,8 +540,8 @@ bool CSampleExpert::Processing(void)
 
 //--- refresh indicators
    m_indicators.Refresh();
-   int copied_rates = CopyRates(NULL, 0, 0, 3, rates);
-   Print(copied_rates);
+   int rates_count = MathMax(InpSqueezeLookbackPeriod, 3);
+   CopyRates(NULL, 0, 0, rates_count, rates);
 //--- it is important to enter the market correctly,
 //--- but it is more important to exit it correctly...
 //--- first check if position exists - try to select it
@@ -485,7 +567,6 @@ bool CSampleExpert::Processing(void)
 //--- no opened position identified
    else
      {
-     // TODO: exclude mondays and only trade between 10 and 18 oclock including
       //--- check for long position (BUY) possibility
       if(LongOpened())
          return(true);
